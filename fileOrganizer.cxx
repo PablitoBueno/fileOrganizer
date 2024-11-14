@@ -11,9 +11,63 @@
 #include <fstream>
 #include <thread>
 #include <mutex>
+#include <queue>
+#include <future>
 
 namespace fs = std::filesystem;
 using namespace std;
+
+// Limite de threads no pool para evitar sobrecarga
+constexpr size_t MAX_THREADS = 4;
+
+// Thread pool
+class ThreadPool {
+public:
+    ThreadPool(size_t numThreads) : stop(false) {
+        for (size_t i = 0; i < numThreads; ++i) {
+            workers.emplace_back([this] {
+                while (true) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock<std::mutex> lock(queueMutex);
+                        condition.wait(lock, [this] { return stop || !tasks.empty(); });
+                        if (stop && tasks.empty()) return;
+                        task = std::move(tasks.front());
+                        tasks.pop();
+                    }
+                    task();
+                }
+            });
+        }
+    }
+
+    ~ThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            stop = true;
+        }
+        condition.notify_all();
+        for (std::thread &worker : workers) {
+            worker.join();
+        }
+    }
+
+    template<class F>
+    void enqueue(F&& f) {
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+            tasks.emplace(std::forward<F>(f));
+        }
+        condition.notify_one();
+    }
+
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queueMutex;
+    std::condition_variable condition;
+    bool stop;
+};
 
 // FileOrganizer class handles file operations
 class FileOrganizer {
@@ -48,7 +102,7 @@ public:
     }
 
     // Organize files alphabetically by the first letter of the filename
-    static void organizeAlphabetically(const fs::path& dir) {
+    static void organizeAlphabetically(const fs::path& dir, ThreadPool& pool) {
         if (dir.empty() || !fs::exists(dir)) {
             showMessage("Invalid directory.");
             return;
@@ -76,12 +130,15 @@ public:
                     continue;
                 }
 
+                // Enqueue tasks for moving files using the thread pool
                 for (const auto& file : files) {
                     char firstChar = toupper(file.filename().string()[0]);
                     if (firstChar == letter) {
-                        if (!moveFile(file, letterFolder / file.filename())) {
-                            showMessage("Error moving file: " + file.string());
-                        }
+                        pool.enqueue([=]() {
+                            if (!moveFile(file, letterFolder / file.filename())) {
+                                showMessage("Error moving file: " + file.string());
+                            }
+                        });
                     }
                 }
             }
@@ -93,7 +150,7 @@ public:
     }
 
     // Organize files based on a given keyword in the filename
-    static void organizeByKeyword(const fs::path& dir, const string& keyword) {
+    static void organizeByKeyword(const fs::path& dir, const string& keyword, ThreadPool& pool) {
         if (dir.empty() || !fs::exists(dir) || keyword.empty()) {
             showMessage("Invalid directory or keyword.");
             return;
@@ -119,9 +176,11 @@ public:
 
             for (const auto& file : files) {
                 if (file.filename().string().find(keyword) != string::npos) {
-                    if (!moveFile(file, keywordFolder / file.filename())) {
-                        showMessage("Error moving file: " + file.string());
-                    }
+                    pool.enqueue([=]() {
+                        if (!moveFile(file, keywordFolder / file.filename())) {
+                            showMessage("Error moving file: " + file.string());
+                        }
+                    });
                 }
             }
 
@@ -148,7 +207,8 @@ void organizeAlphabeticallyCallback(Fl_Widget*, void* data) {
         Fl::warning("Please, enter the directory.");
         return;
     }
-    thread([=]() { FileOrganizer::organizeAlphabetically(dir); }).detach();
+    ThreadPool pool(MAX_THREADS);  // Create a thread pool
+    FileOrganizer::organizeAlphabetically(dir, pool);
 }
 
 // Callback for organizing files by keyword
@@ -160,7 +220,8 @@ void organizeByKeywordCallback(Fl_Widget*, void* data) {
         Fl::warning("Please, enter the directory and keyword.");
         return;
     }
-    thread([=]() { FileOrganizer::organizeByKeyword(dir, keyword); }).detach();
+    ThreadPool pool(MAX_THREADS);  // Create a thread pool
+    FileOrganizer::organizeByKeyword(dir, keyword, pool);
 }
 
 // Create a window for organizing files
