@@ -13,12 +13,37 @@
 #include <mutex>
 #include <queue>
 #include <future>
+#include <sstream>
 
 namespace fs = std::filesystem;
 using namespace std;
 
-// Limite de threads no pool para evitar sobrecarga
+// Thread limit in the pool to prevent overload
 constexpr size_t MAX_THREADS = 4;
+
+// Heuristic to evaluate the "ease" of moving a file
+// Prioritizes smaller files, with shorter paths and specific extensions
+class FileHeuristic {
+public:
+    static int evaluate(const fs::path& file) {
+        if (fs::is_regular_file(file)) {
+            auto size = fs::file_size(file);
+            auto pathLength = file.string().length();
+            auto ext = file.extension().string();
+            
+            // Smaller files and shorter paths have higher priority
+            int priority = size + pathLength;
+            
+            // Prioritize specific extensions (e.g., images, texts, etc.)
+            if (ext == ".txt" || ext == ".jpg" || ext == ".png" || ext == ".pdf" || ext == ".docx" || ext == ".xlsx" || ext == ".mp4" || ext == ".mp3" || ext == ".zip" || ext == ".csv") {
+                priority -= 1000;  // Prioritize these file types
+            }
+
+            return priority;
+        }
+        return 0;
+    }
+};
 
 // Thread pool
 class ThreadPool {
@@ -121,7 +146,10 @@ public:
                 return;
             }
 
-            sort(files.begin(), files.end());
+            // Sort the files according to the heuristic
+            sort(files.begin(), files.end(), [](const fs::path& a, const fs::path& b) {
+                return FileHeuristic::evaluate(a) < FileHeuristic::evaluate(b);  // Prioritize files with smaller heuristics
+            });
 
             // Create subdirectories for each letter (A-Z) and move files
             for (char letter = 'A'; letter <= 'Z'; ++letter) {
@@ -174,6 +202,12 @@ public:
                 return;
             }
 
+            // Sort the files according to the heuristic
+            sort(files.begin(), files.end(), [](const fs::path& a, const fs::path& b) {
+                return FileHeuristic::evaluate(a) < FileHeuristic::evaluate(b);  // Prioritize files with smaller heuristics
+            });
+
+            // Enqueue files with names containing the keyword
             for (const auto& file : files) {
                 if (file.filename().string().find(keyword) != string::npos) {
                     pool.enqueue([=]() {
@@ -188,6 +222,66 @@ public:
         } catch (const exception& e) {
             showMessage("Error organizing files by keyword.");
         }
+    }
+
+    // Organize files based on content, searching for keywords inside the files
+    static void organizeByContent(const fs::path& dir, const vector<string>& keywords, ThreadPool& pool) {
+        if (dir.empty() || !fs::exists(dir)) {
+            showMessage("Invalid directory.");
+            return;
+        }
+
+        vector<fs::path> files;
+        try {
+            for (const auto& entry : fs::directory_iterator(dir)) {
+                if (entry.is_regular_file()) {
+                    files.push_back(entry.path());
+                }
+            }
+
+            if (files.empty()) {
+                showMessage("No files found.");
+                return;
+            }
+
+            // Sort the files according to the heuristic
+            sort(files.begin(), files.end(), [](const fs::path& a, const fs::path& b) {
+                return FileHeuristic::evaluate(a) < FileHeuristic::evaluate(b);  // Prioritize files with smaller heuristics
+            });
+
+            for (const auto& file : files) {
+                string content = getFileContent(file);
+
+                // Check if the content contains any of the keywords
+                for (const auto& keyword : keywords) {
+                    if (content.find(keyword) != string::npos) {
+                        fs::path keywordFolder = dir / keyword;
+                        if (!createDirectory(keywordFolder)) {
+                            continue;
+                        }
+
+                        pool.enqueue([=]() {
+                            if (!moveFile(file, keywordFolder / file.filename())) {
+                                showMessage("Error moving file: " + file.string());
+                            }
+                        });
+                        break;
+                    }
+                }
+            }
+
+            showMessage("Files organized based on content!");
+        } catch (const exception& e) {
+            showMessage("Error organizing files by content.");
+        }
+    }
+
+    // Read file content as a string
+    static string getFileContent(const fs::path& file) {
+        ifstream inputFile(file);
+        stringstream buffer;
+        buffer << inputFile.rdbuf();
+        return buffer.str();
     }
 };
 
@@ -224,6 +318,28 @@ void organizeByKeywordCallback(Fl_Widget*, void* data) {
     FileOrganizer::organizeByKeyword(dir, keyword, pool);
 }
 
+// Callback for organizing files by content
+void organizeByContentCallback(Fl_Widget*, void* data) {
+    pair<Fl_Input*, Fl_Input*>* inputs = static_cast<pair<Fl_Input*, Fl_Input*>*>(data);
+    string dir = inputs->first->value();
+    string keywordsInput = inputs->second->value();
+    if (dir.empty() || keywordsInput.empty()) {
+        Fl::warning("Please, enter the directory and keywords.");
+        return;
+    }
+
+    // Split the keywords input into a vector of keywords
+    vector<string> keywords;
+    stringstream ss(keywordsInput);
+    string keyword;
+    while (getline(ss, keyword, ',')) {
+        keywords.push_back(keyword);
+    }
+
+    ThreadPool pool(MAX_THREADS);  // Create a thread pool
+    FileOrganizer::organizeByContent(dir, keywords, pool);
+}
+
 // Create a window for organizing files
 void createOrganizeWindow(const char* title, Fl_Callback* callback, bool keywordNeeded) {
     Fl_Window* organizeWindow = new Fl_Window(350, 200, title);
@@ -233,7 +349,7 @@ void createOrganizeWindow(const char* title, Fl_Callback* callback, bool keyword
     
     Fl_Input* inputField = nullptr;
     if (keywordNeeded) {
-        inputField = new Fl_Input(100, 100, 200, 25, "Keyword:");
+        inputField = new Fl_Input(100, 100, 200, 25, " Content:");
     }
 
     Fl_Button* okButton = new Fl_Button(100, 150, 200, 30, "Organize");
@@ -253,6 +369,10 @@ int main() {
     Fl_Button* btnKeyword = new Fl_Button(50, 100, 300, 40, "Organize by Keyword");
     btnKeyword->callback([](Fl_Widget*, void*) {
         createOrganizeWindow("Organize by Keyword", organizeByKeywordCallback, true);
+    });
+    Fl_Button* btnContent = new Fl_Button(50, 150, 300, 40, "Organize by Content");
+    btnContent->callback([](Fl_Widget*, void*) {
+        createOrganizeWindow("Organize by Content", organizeByContentCallback, true);
     });
 
     mainWindow->end();
