@@ -35,8 +35,8 @@ public:
             int priority = size + pathLength;
             
             // Prioritize specific extensions (e.g., images, texts, etc.)
-            if (ext == ".txt" || ext == ".jpg" || ext == ".png" || ext == ".pdf" || ext == ".docx" || ext == ".xlsx" || ext == ".mp4" || ext == ".mp3" || ext == ".zip" || ext == ".csv") {
-                priority -= 1000;  // Prioritize these file types
+            if (ext == ".txt" || ext == ".pdf" || ext == ".docx" || ext == ".xlsx") {
+                priority -= 1000; // Decrease the value to prioritize these types
             }
 
             return priority;
